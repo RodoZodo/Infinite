@@ -232,6 +232,19 @@ public abstract class LodEngine {
         Log.info("Stopped Infinite");
     }
 
+    public record Stats(long activeSections, long cachedSections, long nativeBytes, int building, int saving) {}
+
+    public Stats stats() {
+        long inUse = 0, idle = 0;
+        synchronized (this.worlds) {
+            for (var world : this.worlds.values()) {
+                inUse += world.sectionsInUse();
+                idle += world.idleSections();
+            }
+        }
+        return new Stats(inUse, idle, NativeBuffer.liveBytes(), this.ingestQueue.pending(), this.saveQueue.pending());
+    }
+    
     private static boolean awaitUnused(LodWorld world) {
         long deadline = System.currentTimeMillis() + CLOSE_WAIT_MILLIS;
         while (world.isInUse()) {

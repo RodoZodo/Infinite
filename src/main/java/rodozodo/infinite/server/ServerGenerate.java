@@ -341,6 +341,11 @@ public final class ServerGenerate {
         return run != null && run.requested.remove(packed);
     }
 
+    public static boolean isRunning(ResourceKey<Level> dimension) {
+        var run = RUNS.get(dimension);
+        return run != null && run.isRunning();
+    }
+
     private static final class Run implements LodImport.Listener {
         final ResourceKey<Level> dimension;
         final int radius, centerX, centerZ;

@@ -41,6 +41,11 @@ public final class ClientLodEngine extends LodEngine {
         }
         return new ClientLodEngine(folder, storage);
     }
+    
+    public static @Nullable Path currentSaveFolder() {
+        if (!LodSession.inWorld()) return null;
+        return saveFolderFor(Minecraft.getInstance(), LodSession.server()).toAbsolutePath().normalize();
+    }
 
     public Path saveFolder() {
         return this.saveFolder;

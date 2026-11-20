@@ -58,6 +58,11 @@ public final class Imports {
         return true;
     }
 
+    public synchronized boolean isRunning(LodWorld world) {
+        var current = this.running.get(world);
+        return current != null && !current.isFinished();
+    }
+
     public void cancelAll() {
         ArrayList<LodImport<?, ?>> jobs;
         synchronized (this) {

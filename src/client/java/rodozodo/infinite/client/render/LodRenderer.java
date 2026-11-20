@@ -467,6 +467,17 @@ public final class LodRenderer {
         }
     }
 
+    public record Stats(int sections, long gpuBytes, long terrainBytes, int pendingMeshes) {}
+
+    public Stats stats() {
+        return new Stats(
+                this.geometry.getSectionCount(),
+                VBuffer.usage().bytes(),
+                this.geometry.allocatedBytes(),
+                this.meshes.backlog()
+        );
+    }
+
     public static void awaitShutdowns() {
         MeshBuilder.awaitStopping();
     }
