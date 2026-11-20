@@ -1,0 +1,421 @@
+// Traverses the LoD node tree level by level to select visible sections, request missing meshes, and manage fades.
+
+#import <infinite:common/depth.glsl>
+#import <infinite:common/node.glsl>
+#import <infinite:common/section.glsl>
+#import <infinite:common/curvature.glsl>
+
+layout(local_size_x = GROUP_SIZE) in;
+
+layout(binding = 0) uniform sampler2D depthPyramid;
+
+layout(binding = 0, std140) uniform Frame {
+    mat4 viewProjection;    // Camera-relative
+    ivec3 cameraSection;    // Level 0 section containing camera
+    uint pyramidSize;
+    vec3 cameraOffset;  // Camera offset inside cameraSection (blocks)
+    float splitArea;
+    vec4 clipPlanes[6];
+    uint frameStamp;
+    uint requestBudget;
+    float maxDistanceSq;
+    uint nowMillis;
+    float curveDrop;
+    float curveStart;
+    float screenPixels;
+    vec4 around;
+    float waveRadius;
+};
+
+layout(location = 0) uniform uint level;
+
+layout(binding = 0, std430) restrict buffer Nodes {
+    uvec4 nodes[];
+};
+
+struct LevelQueue {
+    uvec3 groups;
+    uint count;
+};
+
+layout(binding = 1, std430) restrict buffer LevelQueues {
+    LevelQueue queues[];
+};
+
+layout(binding = 2, std430) restrict readonly buffer QueueIn {
+    uint queueIn[];
+};
+
+layout(binding = 3, std430) restrict writeonly buffer QueueOut {
+    uint queueOut[];
+};
+
+layout(binding = 4, std430) restrict buffer Selected {
+    uint selectedCount;
+    uint selectedSections[];
+};
+
+#ifndef AROUND
+
+layout(binding = 7, std430) restrict writeonly buffer SelectedFades {
+    uint selectedFades[];
+};
+#endif
+
+layout(binding = 5, std430) restrict buffer Requests {
+    uint requestCount;
+    uint animationsDrawn;
+    uvec2 requestPositions[];
+};
+
+#ifdef AROUND
+layout(binding = 6, std430) restrict buffer LastSeen {
+#else
+layout(binding = 6, std430) restrict writeonly buffer LastSeen {
+#endif
+    uint lastSeen[];
+};
+
+layout(binding = 8, std430) restrict buffer MeshUse {
+    uint dropCount;
+    uint dropPad;
+    uvec2 dropPositions[MAX_DROPS];
+    uint meshUsed[];
+};
+
+void stamp(uint nodeId) {
+#ifdef AROUND
+    uint seen = lastSeen[nodeId];
+    if (seen != 0xFFFFFFFFu && seen >= frameStamp) return;
+#endif
+    lastSeen[nodeId] = frameStamp;
+}
+
+layout(binding = 9, std430) restrict readonly buffer Sections {
+    SectionMetadata sections[];
+};
+
+layout(binding = 11, std430) restrict buffer FadeStates {
+    uint fadeStates[];
+};
+
+const uint FADE_NONE = 0xFFFFFFFFu;
+const uint FADE_PENDING = 0u;
+
+struct Footprint {
+    vec3 lo;
+    vec3 hi;
+    float area;
+    bool touchesCamera;
+};
+
+float parallelogramArea(vec2 a, vec2 b) {
+    return abs(a.x * b.y - a.y * b.x);
+}
+
+Footprint project(mat4 m, vec3 origin, vec3 extent) {
+    vec4 base = m * vec4(origin, 1.0);
+    vec4 axes[3] = vec4[3](m[0] * extent.x, m[1] * extent.y, m[2] * extent.z);
+
+    Footprint footprint;
+    footprint.touchesCamera = false;
+    vec3 corners[8];
+    for (uint i = 0u; i < 8u; i++) {
+        vec4 clip = base;
+        for (uint axis = 0u; axis < 3u; axis++) {
+            if ((i & (1u << axis)) != 0u) clip += axes[axis];
+        }
+        footprint.touchesCamera = footprint.touchesCamera || clip.w <= 1e-4;
+        vec3 ndc = clip.xyz / clip.w;
+        corners[i] = vec3(ndcToUv(ndc.xy), ndcToDepth(ndc.z));
+    }
+
+    footprint.lo = corners[0];
+    footprint.hi = corners[0];
+    for (uint i = 1u; i < 8u; i++) {
+        footprint.lo = min(footprint.lo, corners[i]);
+        footprint.hi = max(footprint.hi, corners[i]);
+    }
+    footprint.lo = clamp(footprint.lo, 0.0, 1.0);
+    footprint.hi = clamp(footprint.hi, 0.0, 1.0);
+
+    float area = 0.0;
+    for (uint pass = 0u; pass < 2u; pass++) {
+        uint corner = pass * 7u;
+        vec2 edge[3];
+        for (uint axis = 0u; axis < 3u; axis++) {
+            edge[axis] = corners[corner ^ (1u << axis)].xy - corners[corner].xy;
+        }
+        area += parallelogramArea(edge[0], edge[1]) + parallelogramArea(edge[0], edge[2]) + parallelogramArea(edge[1], edge[2]);
+    }
+    footprint.area = footprint.touchesCamera ? 1e30 : area * 0.5;
+    return footprint;
+}
+
+Footprint project(vec3 origin, vec3 extent) {
+    return project(viewProjection, origin, extent);
+}
+
+mat4 yawTurn(float angle) {
+    float c = cos(angle), s = sin(angle);
+    return mat4(vec4(c, 0.0, -s, 0.0), vec4(0.0, 1.0, 0.0, 0.0), vec4(s, 0.0, c, 0.0), vec4(0.0, 0.0, 0.0, 1.0));
+}
+
+bool outsideFrustum(mat4 turn, vec3 origin, vec3 extent) {
+    for (uint i = 0u; i < 5u; i++) {
+        vec4 plane = clipPlanes[i];
+        plane.xyz = transpose(mat3(turn)) * plane.xyz;
+        vec3 farthestCorner = origin + extent * step(vec3(0.0), plane.xyz);
+        if (dot(plane.xyz, farthestCorner) + plane.w < 0.0) return true;
+    }
+    return false;
+}
+
+bool outsideFrustum(vec3 origin, vec3 extent) {
+    return outsideFrustum(mat4(1.0), origin, extent);
+}
+
+bool occluded(Footprint footprint) {
+    if (footprint.touchesCamera) return false;
+    vec2 extent = footprint.hi.xy - footprint.lo.xy;
+    if (any(greaterThanEqual(extent, vec2(1.0 - 1e-6)))) return false;
+
+    ivec2 baseSize = ivec2(pyramidSize >> 16, pyramidSize & 0xFFFFu);
+    vec2 pixels = extent * vec2(baseSize);
+    int mip = int(floor(log2(max(max(pixels.x, pixels.y), 1.0)))) - 1;
+    mip = clamp(mip, 0, textureQueryLevels(depthPyramid) - 1);
+    ivec2 size = max(baseSize >> mip, ivec2(1));
+    ivec2 from = clamp(ivec2(floor(footprint.lo.xy * vec2(size))), ivec2(0), size - 1);
+    ivec2 to = clamp(ivec2(ceil(footprint.hi.xy * vec2(size))), ivec2(0), size - 1);
+
+    float occluder = DEPTH_NEAR;
+    for (int y = from.y; y <= to.y; y++) {
+        for (int x = from.x; x <= to.x; x++) {
+            occluder = depthFarthest(occluder, texelFetch(depthPyramid, ivec2(x, y), mip).r);
+        }
+    }
+    float nodeNearest = depthNearest(footprint.lo.z, footprint.hi.z);
+    return depthNearerOrEqual(occluder, nodeNearest);
+}
+
+float nearestDistanceSq(vec3 origin, float size) {
+    vec2 nearest = clamp(vec2(0.0), origin.xz, origin.xz + size);
+    return dot(nearest, nearest);
+}
+
+float farthestDistanceSq(vec3 origin, float size) {
+    vec2 farthest = max(abs(origin.xz), abs(origin.xz + size));
+    return dot(farthest, farthest);
+}
+
+vec3 nodeOrigin(ivec3 origin) {
+    return vec3((origin - cameraSection) << 5) - cameraOffset;
+}
+
+void curvedBox(vec3 origin, float size, out vec3 boxOrigin, out vec3 extent) {
+    boxOrigin = origin;
+    extent = vec3(size);
+    if (curveDrop > 0.0) {
+        float nearestDrop = curvatureDrop(vec2(sqrt(nearestDistanceSq(origin, size)), 0.0), curveDrop, curveStart);
+        float farthestDrop = curvatureDrop(vec2(sqrt(farthestDistanceSq(origin, size)), 0.0), curveDrop, curveStart);
+        boxOrigin.y -= farthestDrop;
+        extent.y += farthestDrop - nearestDrop;
+    }
+}
+
+bool splits(ivec3 position, uint lod) {
+    vec3 origin = nodeOrigin(position << lod);
+    float size = float(32 << lod);
+    if (nearestDistanceSq(origin, size) > maxDistanceSq) return false;
+    vec3 boxOrigin, extent;
+    curvedBox(origin, size, boxOrigin, extent);
+    return project(boxOrigin, extent).area > splitArea;
+}
+
+bool drawnFiner(ivec3 position, uint lod, ivec3 step) {
+    ivec3 beside = position + step;
+    for (uint up = 0u; lod + up <= uint(TOP_LEVEL); up++) {
+        ivec3 ancestor = beside >> up;
+        if (up > 0u && ancestor == position >> up) return true;
+        if (!splits(ancestor, lod + up)) return false;
+    }
+    return true;
+}
+
+uint skirtSides(uvec2 packed, SectionMetadata section) {
+    uint lod = lodLevel(packed);
+    if (lod == 0u || sectionQuadCount(section, GROUP_TRANSLUCENT) == 0u) return 0u;
+    ivec3 position = lodPosition(packed);
+    return (drawnFiner(position, lod, ivec3(0, 0, -1)) ? 1u : 0u) | (drawnFiner(position, lod, ivec3(0, 0, 1)) ? 2u : 0u)
+            | (drawnFiner(position, lod, ivec3(-1, 0, 0)) ? 4u : 0u) | (drawnFiner(position, lod, ivec3(1, 0, 0)) ? 8u : 0u);
+}
+
+layout(binding = 10, std430) restrict buffer ViewWanted {
+    uint viewWantedAt;
+    uint nearestWaiting;
+    uint fadingNodes;
+};
+
+const uint AROUND_QUIET = 8u;
+
+void requestMesh(uint nodeId, uvec4 node) {
+#ifdef AROUND
+    if (floatBitsToUint(around.z) - viewWantedAt < AROUND_QUIET) return;
+#else
+    if (viewWantedAt != frameStamp) viewWantedAt = frameStamp;
+#endif
+    if (nodeRequested(node) || requestCount >= requestBudget) return;
+    uint slot = atomicAdd(requestCount, 1u);
+    if (slot >= MAX_REQUESTS) return;
+    requestPositions[slot] = node.xy;
+    atomicOr(nodes[nodeId].z, NODE_REQUESTED);
+}
+
+void queueChildren(uvec4 node, uint cut) {
+    uint first = nodeFirstChild(node);
+    if (first == NODE_NONE || first == NODE_EMPTY) return;
+    uint count = nodeChildCount(node);
+    uint at = atomicAdd(queues[level + 1u].count, count);
+    uint groupsBefore = (at + GROUP_SIZE - 1u) / GROUP_SIZE;
+    uint groupsAfter = (at + count + GROUP_SIZE - 1u) / GROUP_SIZE;
+    if (groupsAfter != groupsBefore) atomicAdd(queues[level + 1u].groups.x, groupsAfter - groupsBefore);
+    for (uint i = 0u; i < count; i++) {
+        if (at + i < QUEUE_CAPACITY) queueOut[at + i] = (first + i) | cut << 24;
+    }
+}
+
+void selectForDrawing(uint nodeId, uvec4 node, Footprint footprint, bool standIn, uint from, uint share) {
+    uint mesh = nodeMesh(node);
+    if (mesh != NODE_NONE && mesh != NODE_EMPTY) meshUsed[nodeId] = nowMillis;
+#ifdef AROUND
+    if (mesh != NODE_NONE) stamp(nodeId);
+    return;
+#else
+    if (mesh == NODE_NONE || selectedCount >= QUEUE_CAPACITY) return;
+    stamp(nodeId);
+    if (mesh == NODE_EMPTY || from >= share) return;
+    if (footprint.area * screenPixels < 1.0) return;
+    uint slot = atomicAdd(selectedCount, 1u);
+    if (slot >= QUEUE_CAPACITY) return;
+    SectionMetadata section = sections[mesh];
+    selectedSections[slot] = mesh | skirtSides(node.xy, section) << 24 | (standIn ? SELECTED_STAND_IN : 0u);
+    selectedFades[slot] = from | (255u - share) << 8;
+    if (animationsDrawn == 0u && sectionAnimated(section)) atomicOr(animationsDrawn, 1u);
+#endif
+}
+
+#ifndef AROUND
+void noteWaiting(vec3 origin, float size) {
+    uint nearness = 0x7F800000u - floatBitsToUint(sqrt(nearestDistanceSq(origin, size)));
+    if (nearestWaiting < nearness) atomicMax(nearestWaiting, nearness);
+}
+
+uint fadeIntoChildren(uint nodeId, uvec4 node, Footprint footprint, vec3 origin, float size, uint state, uint share) {
+    uint mesh = nodeMesh(node);
+    if (share == 0u || mesh == NODE_NONE || mesh == NODE_EMPTY || nodeFirstChild(node) == NODE_EMPTY
+            || farthestDistanceSq(origin, size) + 4096.0 > maxDistanceSq) {
+        fadeStates[nodeId] = FADE_NONE;
+        return share;
+    }
+    uint now = max(nowMillis & 0x7FFFFFFFu, 1u);    // Non-zero so 0 remains FADE_PENDING
+    if (state == FADE_PENDING) {
+        if (sqrt(nearestDistanceSq(origin, size)) > waveRadius) {
+            atomicAdd(fadingNodes, 1u);
+            selectForDrawing(nodeId, node, footprint, true, 0u, share);
+            return 0u;
+        }
+        state = now;
+        fadeStates[nodeId] = now;
+    }
+    float progress = float((now - state) & 0x7FFFFFFFu) / FADE_MILLIS;
+    if (progress >= 1.0) {
+        fadeStates[nodeId] = FADE_NONE;
+        return share;
+    }
+    atomicAdd(fadingNodes, 1u);
+    uint faded = uint(smoothstep(0.0, 1.0, progress) * 255.0);
+    selectForDrawing(nodeId, node, footprint, true, faded, share);
+    return min(share, faded);
+}
+#endif
+
+void main() {
+    uint slot = gl_GlobalInvocationID.x;
+    if (slot >= min(queues[level].count, QUEUE_CAPACITY)) return;
+    uint entry = queueIn[slot];
+    uint nodeId = entry & 0xFFFFFFu;
+    uint share = 255u - (entry >> 24);
+    uvec4 node = nodes[nodeId];
+
+    uint lod = lodLevel(node.xy);
+    vec3 origin = nodeOrigin(lodOrigin(node.xy));
+    float size = float(32 << lod);
+    if (nearestDistanceSq(origin, size) > maxDistanceSq) {
+        stamp(nodeId);
+        return;
+    }
+    vec3 boxOrigin, extent;
+    curvedBox(origin, size, boxOrigin, extent);
+#ifdef AROUND
+    vec3 centre = boxOrigin + extent * 0.5;
+    float yaw = atan(centre.x, centre.z);
+    bool keepOnly = (entry >> 24) != 0u || outsideFrustum(yawTurn(around.x - yaw), boxOrigin, extent);
+    Footprint footprint = project(viewProjection * yawTurn(around.x + around.y - yaw), boxOrigin, extent);
+    if (keepOnly) {
+        stamp(nodeId);
+        if (lod != 0u && footprint.area > splitArea) queueChildren(node, 255u);
+        return;
+    }
+#else
+    if (outsideFrustum(boxOrigin, extent)) {
+        stamp(nodeId);
+        return;
+    }
+    Footprint footprint = project(boxOrigin, extent);
+#endif
+#ifndef AROUND
+    if (occluded(footprint)) {
+        stamp(nodeId);
+        return;
+    }
+#endif
+
+    if (lod != 0u && footprint.area > splitArea) {
+        if (nodeFirstChild(node) == NODE_NONE) {
+            requestMesh(nodeId, node);
+#ifndef AROUND
+            if (share != 0u) noteWaiting(origin, size);
+#endif
+            if (farthestDistanceSq(origin, size) + 4096.0 <= maxDistanceSq) selectForDrawing(nodeId, node, footprint, true, 0u, share);
+            else stamp(nodeId);
+        } else {
+            uint childShare = share;
+            uint state = fadeStates[nodeId];
+#ifdef AROUND
+            if (state == FADE_PENDING) fadeStates[nodeId] = FADE_NONE;
+            stamp(nodeId);
+            uint mesh = nodeMesh(node);
+            if (state == FADE_NONE && level != 0u && mesh != NODE_NONE && mesh != NODE_EMPTY && nodeFirstChild(node) != NODE_EMPTY) {
+                if (project(viewProjection * yawTurn(around.x - yaw), boxOrigin, extent).area <= splitArea) {
+                    meshUsed[nodeId] = nowMillis;
+                } else if (nowMillis - meshUsed[nodeId] >= DROP_MILLIS) {
+                    meshUsed[nodeId] = nowMillis;
+                    uint at = atomicAdd(dropCount, 1u);
+                    if (at < MAX_DROPS) dropPositions[at] = node.xy;
+                }
+            }
+#else
+            if (state != FADE_NONE) childShare = fadeIntoChildren(nodeId, node, footprint, origin, size, state, share);
+#endif
+            queueChildren(node, 255u - childShare);
+        }
+    } else if (nodeMesh(node) != NODE_NONE) {
+#ifndef AROUND
+        if (nodeFirstChild(node) != NODE_NONE && fadeStates[nodeId] != FADE_NONE) fadeStates[nodeId] = FADE_NONE;
+#endif
+        selectForDrawing(nodeId, node, footprint, false, 0u, share);
+    } else {
+        requestMesh(nodeId, node);
+        if (lod != 0u) queueChildren(node, 255u - share);
+    }
+}

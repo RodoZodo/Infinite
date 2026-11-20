@@ -1,0 +1,14 @@
+{
+  "required": true,
+  "package": "rodozodo.infinite.hook",
+  "compatibilityLevel": "JAVA_25",
+  "injectors": {
+    "defaultRequire": 1
+  },
+  "mixins": [
+    "minecraft.LevelHook"
+  ],
+  "overwrites": {
+    "requireAnnotations": true
+  }
+}

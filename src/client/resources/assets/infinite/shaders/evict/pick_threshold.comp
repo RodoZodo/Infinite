@@ -1,0 +1,24 @@
+
+#import <infinite:evict/eviction.glsl>
+#define SCAN_SIZE 256u
+#import <infinite:common/scan.glsl>
+
+layout(local_size_x = 256) in;
+
+void main() {
+    uint i = scanIndex();
+    uint oldest = AGE_BUCKETS - 1u - i * 4u;
+    uvec4 counts = uvec4(histogram[oldest], histogram[oldest - 1u], histogram[oldest - 2u], histogram[oldest - 3u]);
+    uint older = workgroupExclusiveSum(counts.x + counts.y + counts.z + counts.w);
+    bool last = i == SCAN_SIZE - 1u;// Bucket 0: if fewer than batch candidates exist, take everything.
+    if (older >= batch || (older + counts.x + counts.y + counts.z + counts.w < batch && !last)) return;
+
+    for (uint k = 0u; k < 4u; k++) {
+        if (older + counts[k] >= batch || k == 3u) {
+            thresholdBucket = oldest - k;
+            olderCount = older;
+            return;
+        }
+        older += counts[k];
+    }
+}

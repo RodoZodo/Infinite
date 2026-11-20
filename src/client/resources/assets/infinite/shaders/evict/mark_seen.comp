@@ -1,0 +1,21 @@
+// Applies the LoD trees lastSeen changes
+
+layout(local_size_x = 128) in;
+
+layout(binding = 1, std430) restrict writeonly buffer LastSeen {
+    uint lastSeen[];
+};
+
+layout(binding = 4, std430) restrict readonly buffer Changes {
+    uint changes[];
+};
+
+layout(location = 0) uniform uint frame;
+layout(location = 1) uniform uint changeCount;
+
+void main() {
+    uint i = gl_GlobalInvocationID.x;
+    if (i >= changeCount) return;
+    uint change = changes[i];
+    lastSeen[change & 0x7FFFFFFFu] = (change >> 31) != 0u ? frame : 0xFFFFFFFFu;
+}

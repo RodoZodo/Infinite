@@ -1,0 +1,41 @@
+// Writes the translucent draws far to near: each listed section claims the next indices of its distance bucket
+
+#import <infinite:draws/draw_lists.glsl>
+
+layout(local_size_x = GENERATE_GROUP) in;
+
+layout(binding = 2, std430) restrict writeonly buffer Commands {
+    DrawCommand commands[];
+};
+
+layout(binding = 3, std430) restrict readonly buffer Sections {
+    SectionMetadata sections[];
+};
+
+layout(binding = 7, std430) restrict buffer Translucency {
+    uint bucketNext[DISTANCE_BUCKETS];
+    uint translucentList[];
+};
+
+void main() {
+    uint entry = gl_GlobalInvocationID.x;
+    if (entry >= min(translucentSections, uint(TRANSLUCENT_CAPACITY))) return;
+    uint listed = translucentList[entry];
+    uint drawSlot = listed & 0x3FFFFFu;
+    SectionMetadata section = sections[selectedMesh(selectedSections[drawSlot])];
+    uint quads = sectionQuadCount(section, GROUP_TRANSLUCENT);
+    uint index = atomicAdd(bucketNext[listed >> 22], drawsFor(quads));
+    for (uint written = 0u; written < quads; written += MAX_QUADS_PER_DRAW) {
+        if (index < TRANSLUCENT_CAPACITY) {
+            commands[index] = quadDraw(sectionFirstQuad(section) + written, min(quads - written, MAX_QUADS_PER_DRAW), drawSlot);
+        }
+        index++;
+    }
+
+    if (selectedSkirtSides(selectedSections[drawSlot]) == 0u) return;
+    uint skirtIndex = atomicAdd(skirtCount, drawsFor(quads));
+    for (uint written = 0u; written < quads && skirtIndex < SKIRT_CAPACITY; written += MAX_QUADS_PER_DRAW) {
+        commands[TRANSLUCENT_CAPACITY + skirtIndex++] = quadDraw(sectionFirstQuad(section) + written,
+                min(quads - written, MAX_QUADS_PER_DRAW), drawSlot);
+    }
+}

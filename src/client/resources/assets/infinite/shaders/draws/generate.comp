@@ -1,0 +1,202 @@
+// Builds opaque quad block draw lists and translucent distance bucket counts from occlusion results
+
+#import <infinite:draws/draw_lists.glsl>
+
+layout(local_size_x = GENERATE_GROUP) in;
+
+layout(binding = 2, std430) restrict writeonly buffer Blocks {
+    uvec2 blocks[];
+};
+
+layout(binding = 3, std430) restrict readonly buffer Sections {
+    SectionMetadata sections[];
+};
+
+// Frame id at which each section last had a visible pixel (current and previous frame)
+layout(binding = 4, std430) restrict readonly buffer VisibleNow {
+    uint visibleNow[];
+};
+
+layout(binding = 5, std430) restrict readonly buffer VisibleBefore {
+    uint visibleBefore[];
+};
+
+layout(binding = 6, std430) restrict writeonly buffer DrawPositions {
+    uvec2 drawPositions[];
+};
+
+layout(binding = 7, std430) restrict buffer Translucency {
+    uint bucketCounts[DISTANCE_BUCKETS];
+    uint translucentList[];
+};
+
+layout(binding = 8, std430) restrict readonly buffer SelectedFades {
+    uint selectedFades[];
+};
+
+layout(binding = 10, std430) restrict writeonly buffer DrawCorners {
+    uvec4 drawCorners[];
+};
+
+// Per draw slot: AO cell table offset in the geometry store (0 if none)
+layout(binding = 11, std430) restrict writeonly buffer DrawAo {
+    uint drawAo[];
+};
+
+uint fitting(uint base, uint count, uint capacity) {
+    return min(count, capacity - min(base, capacity));
+}
+
+bool nearVanilla(SectionMetadata section) {
+    uint lod = lodLevel(section.header.xy);
+    vec3 halfSize = vec3(16.0 * float(1u << lod));
+    vec3 centre = vec3((lodOrigin(section.header.xy) - cameraSection) << 5) - cameraOffset + halfSize;
+    vec3 nearest = max(abs(centre) - halfSize, vec3(0.0));
+
+    // Match terrain.vert nearVanilla test with a 0.5-block rounding margin
+    float reach = vanillaDistance + 64.5;
+    return dot(nearest, nearest) <= reach * reach;
+}
+
+bool groupVisible(uint group, ivec3 relative) {
+    if (group <= GROUP_DOUBLE_SIDED) return true;
+    uint face = group - 2u;
+    if (face == 0u) return relative.y >= 0;
+    if (face == 1u) return relative.y <= 0 || curveDrop > 0.0;
+    if (face == 2u) return relative.z >= 0;
+    if (face == 3u) return relative.z <= 0;
+    if (face == 4u) return relative.x >= 0;
+    return relative.x <= 0;
+}
+
+struct QuadRun {
+    uint firstQuad;
+    uint quads;
+    uint masked;
+};
+
+const uint MAX_RUNS = 7u;
+
+uint buildRuns(out QuadRun runs[MAX_RUNS], uint base, SectionMetadata section, ivec3 relative, bool allMasked) {
+    uint count = 0u;
+    uint firstQuad = base + sectionQuadCount(section, GROUP_TRANSLUCENT);
+    for (uint group = GROUP_DOUBLE_SIDED; group < 8u; group++) {
+        uint quads = sectionQuadCount(section, group);
+        if (quads != 0u && groupVisible(group, relative)) {
+            uint masked = (allMasked || group == GROUP_DOUBLE_SIDED || groupMayDiscard(section, group)) ? 1u : 0u;
+            if (count != 0u && runs[count - 1u].masked == masked
+                    && runs[count - 1u].firstQuad + runs[count - 1u].quads == firstQuad) {
+                runs[count - 1u].quads += quads;
+            } else {
+                runs[count] = QuadRun(firstQuad, quads, masked);
+                count++;
+            }
+        }
+        firstQuad += quads;
+    }
+    return count;
+}
+
+uint blocksInRuns(QuadRun runs[MAX_RUNS], uint count, uint masked) {
+    uint total = 0u;
+    for (uint i = 0u; i < count; i++) {
+        if (runs[i].masked == masked) total += blocksFor(runs[i].quads);
+    }
+    return total;
+}
+
+uint quadsInRuns(QuadRun runs[MAX_RUNS], uint count, uint masked) {
+    uint total = 0u;
+    for (uint i = 0u; i < count; i++) {
+        if (runs[i].masked == masked) total += runs[i].quads;
+    }
+    return total;
+}
+
+void writeRuns(QuadRun runs[MAX_RUNS], uint count, uint masked, uint at, uint limit, uint drawSlot) {
+    uint written = 0u;
+    for (uint i = 0u; i < count; i++) {
+        if (runs[i].masked != masked) continue;
+        uint blocksNeeded = blocksFor(runs[i].quads);
+        for (uint block = 0u; block < blocksNeeded && written < limit; block++) {
+            uint drawnQuads = block * BLOCK_QUADS;
+            blocks[at + written++] = uvec2(runs[i].firstQuad + drawnQuads,
+                    drawSlot | ((min(runs[i].quads - drawnQuads, BLOCK_QUADS) - 1u) << 22));
+        }
+    }
+}
+
+void main() {
+    // Walk selection backwards (finest/nearest first) for early-Z rejection
+    uint total = selectedTotal();
+    uint slot = gl_GlobalInvocationID.x;
+    if (slot >= total) return;
+    uint drawSlot = total - 1u - slot;
+    uint selected = selectedSections[drawSlot];
+    uint sectionId = selectedMesh(selected);
+    if (visibleNow[sectionId] != frameId) return;
+    bool newlyVisible = visibleBefore[sectionId] != frameId - 1u;
+
+    SectionMetadata section = sections[sectionId];
+    drawPositions[drawSlot] = section.header.xy;
+
+    uint fade = selectedFades[drawSlot] & 0xFFFFu;
+    drawCorners[drawSlot] = uvec4(uvec3(lodOrigin(section.header.xy) << 5),
+            floatBitsToUint(float(1u << lodLevel(section.header.xy))) | selectedSkirtSides(selected)
+            | (selectedStandIn(selected) ? 0x10u : 0u) | fade << 5);
+    drawAo[drawSlot] = sectionAoTables(section);
+    bool allMasked = nearVanilla(section) || fade != 0u;
+
+    uint lod = lodLevel(section.header.xy);
+    ivec3 relative = lodPosition(section.header.xy) - (cameraSection >> lod);
+    QuadRun runs[MAX_RUNS];
+    uint runCount = buildRuns(runs, sectionFirstQuad(section), section, relative, allMasked);
+    uint solidWanted = blocksInRuns(runs, runCount, 0u);
+    uint maskedWanted = blocksInRuns(runs, runCount, 1u);
+    if (solidWanted + maskedWanted != 0u) {
+        uint solidAt = 0u, solidFit = 0u, maskedAt = 0u, maskedFit = 0u;
+        if (solidWanted != 0u) {
+            solidAt = atomicAdd(solidBlocks, solidWanted);
+            solidFit = fitting(solidAt, solidWanted, solidBlockCapacity);
+            if (solidFit != 0u) atomicAdd(solidDraw.instanceCount, solidFit);
+        }
+        if (maskedWanted != 0u) {
+            maskedAt = atomicAdd(maskedBlocks, maskedWanted);
+            maskedFit = fitting(maskedAt, maskedWanted, maskedBlockCapacity);
+            if (maskedFit != 0u) atomicAdd(maskedDraw.instanceCount, maskedFit);
+        }
+        if (solidFit != 0u) writeRuns(runs, runCount, 0u, solidAt, solidFit, drawSlot);
+        if (maskedFit != 0u) writeRuns(runs, runCount, 1u, solidBlockCapacity + maskedAt, maskedFit, drawSlot);
+        if (solidFit == solidWanted) atomicAdd(solidQuads, quadsInRuns(runs, runCount, 0u));
+        if (maskedFit == maskedWanted) atomicAdd(maskedQuads, quadsInRuns(runs, runCount, 1u));
+        if (newlyVisible) {
+            uint newSolidAt = 0u, newSolidFit = 0u, newMaskedAt = 0u, newMaskedFit = 0u;
+            if (solidWanted != 0u) {
+                newSolidAt = atomicAdd(newlySolidBlocks, solidWanted);
+                newSolidFit = fitting(newSolidAt, solidWanted, newlyVisibleBlockCapacity);
+                if (newSolidFit != 0u) atomicAdd(newlySolidDraw.instanceCount, newSolidFit);
+            }
+            if (maskedWanted != 0u) {
+                newMaskedAt = atomicAdd(newlyMaskedBlocks, maskedWanted);
+                newMaskedFit = fitting(newMaskedAt, maskedWanted, newlyVisibleBlockCapacity);
+                if (newMaskedFit != 0u) atomicAdd(newlyMaskedDraw.instanceCount, newMaskedFit);
+            }
+            if (newSolidFit != 0u) writeRuns(runs, runCount, 0u, newlySolidBase + newSolidAt, newSolidFit, drawSlot);
+            if (newMaskedFit != 0u) writeRuns(runs, runCount, 1u, newlyMaskedBase + newMaskedAt, newMaskedFit, drawSlot);
+            if (newSolidFit == solidWanted) atomicAdd(newlySolidQuads, quadsInRuns(runs, runCount, 0u));
+            if (newMaskedFit == maskedWanted) atomicAdd(newlyMaskedQuads, quadsInRuns(runs, runCount, 1u));
+        }
+    }
+
+    uint translucentQuads = sectionQuadCount(section, GROUP_TRANSLUCENT);
+    if (translucentQuads != 0u) {
+        uint entry = atomicAdd(translucentSections, 1u);
+        if (entry < TRANSLUCENT_CAPACITY) {
+            uint bucket = distanceBucket(section);
+            uint sectionDraws = drawsFor(translucentQuads);
+            translucentList[entry] = drawSlot | (bucket << 22);
+            atomicAdd(bucketCounts[bucket], sectionDraws);
+            atomicAdd(translucentCount, sectionDraws);
+        }
+    }
+}

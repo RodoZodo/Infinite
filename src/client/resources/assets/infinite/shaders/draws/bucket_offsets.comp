@@ -1,0 +1,18 @@
+// Turns the translucent distance bucket counts into each bucket's first draw index.
+
+#define SCAN_SIZE 256u
+#import <infinite:common/scan.glsl>
+
+layout(local_size_x = 256) in;
+
+layout(binding = 0, std430) restrict buffer Buckets {
+    uvec4 buckets[256];
+};
+
+void main() {
+    uint i = scanIndex();
+    uvec4 counts = buckets[i];
+    uvec4 within = uvec4(0u, counts.x, counts.x + counts.y, counts.x + counts.y + counts.z);
+    uint base = workgroupExclusiveSum(within.w + counts.w);
+    buckets[i] = within + base;
+}

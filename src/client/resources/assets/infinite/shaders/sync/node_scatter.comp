@@ -1,0 +1,43 @@
+// Applies batched GPU writes to the Lod node and section metadata buffers
+
+layout(local_size_x = 64) in;
+
+struct WriteRecord {
+    uvec4 destinations;
+    uvec4 values[4];
+};
+
+layout(set = 0, binding = 0, std430) restrict readonly buffer Records {
+    WriteRecord records[];
+};
+
+layout(set = 0, binding = 1, std430) restrict writeonly buffer Nodes {
+    uvec4 nodes[];
+};
+
+layout(set = 0, binding = 2, std430) restrict writeonly buffer SectionMetadata {
+    uvec4 sectionMetadata[];
+};
+
+layout(push_constant) uniform Push {
+    uint writeCount;
+};
+
+const uint METADATA_FLAG = 0x80000000u;
+
+void main() {
+    uint write = gl_GlobalInvocationID.x;
+    if (write >= writeCount) {
+        return;
+    }
+    uint record = write >> 2u;
+    uint slot = write & 3u;
+    uint destination = records[record].destinations[slot];
+    uvec4 value = records[record].values[slot];
+    uint index = destination & ~METADATA_FLAG;
+    if ((destination & METADATA_FLAG) != 0u) {
+        sectionMetadata[index] = value;
+    } else {
+        nodes[index] = value;
+    }
+}

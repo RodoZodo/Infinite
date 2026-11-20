@@ -1,0 +1,131 @@
+import groovy.json.JsonOutput
+
+plugins {
+	id 'net.fabricmc.fabric-loom' version "${loom_plugin}"
+}
+
+def prop(String name) {
+	return project.property(name).toString()
+}
+
+def targetJava = prop("target_java") as int
+def lwjglUnsafe = prop("lwjgl_unsafe").equalsIgnoreCase("true")
+def shipAllPlatforms = prop("ship_all_platforms").equalsIgnoreCase("true")
+
+repositories {
+	exclusiveContent {
+		forRepository {
+			maven {
+				name = "Modrinth"
+				url = "https://api.modrinth.com/maven"
+			}
+		}
+		filter {
+			includeGroup "maven.modrinth"
+		}
+	}
+
+	mavenCentral()
+}
+
+def acceptedVersions(String releaseLine, String alsoExact) {
+	def accepted = []
+	alsoExact.split(/\s+/).findAll { !it.isEmpty() }.each { accepted << "=${it}" }
+	accepted << ">=${releaseLine}- <=${releaseLine}"
+	return accepted
+}
+
+def mcVersions = acceptedVersions(prop("mc"), "") + ["~" + prop("mc")]
+def sodiumVersions = ">=${prop('sodium_min')}"
+
+processResources {
+	inputs.properties([
+		version: project.version,
+		minecraft_versions: mcVersions,
+		sodium_versions: sodiumVersions,
+	])
+	filesMatching("fabric.mod.json") {
+		filter { line ->
+			line.replace('"${minecraft_versions}"', JsonOutput.toJson(mcVersions))
+				.replace('"${sodium_versions}"', JsonOutput.toJson(sodiumVersions))
+				.replace('${version}', project.version.toString())
+		}
+	}
+}
+
+dependencies {
+	minecraft "com.mojang:minecraft:${prop('mc')}"
+	implementation "net.fabricmc:fabric-loader:${prop('fabric_loader')}"
+	implementation "net.fabricmc.fabric-api:fabric-api:${prop('fabric_api')}"
+
+	["fabric-api-base", "fabric-rendering-fluids-v1", "fabric-resource-loader-v0", "fabric-command-api-v2"].each { module ->
+		runtimeOnly fabricApi.module(module, prop("fabric_api"))
+	}
+
+	implementation "maven.modrinth:sodium:${prop('sodium')}"
+
+	implementation platform("org.lwjgl:lwjgl-bom:${prop('lwjgl')}")
+	if (lwjglUnsafe) {
+		implementation "org.lwjgl:lwjgl:unsafe"
+		include(implementation "org.lwjgl:lwjgl-zstd:unsafe")
+		include(implementation "org.lwjgl:lwjgl-lz4:unsafe")
+	} else {
+		implementation "org.lwjgl:lwjgl"
+		include(implementation "org.lwjgl:lwjgl-zstd")
+		include(implementation "org.lwjgl:lwjgl-lz4")
+	}
+	runtimeOnly "org.lwjgl:lwjgl:${prop('lwjgl')}:natives-windows"
+	runtimeOnly "org.lwjgl:lwjgl:${prop('lwjgl')}:natives-linux"
+	include(runtimeOnly "org.lwjgl:lwjgl-zstd:${prop('lwjgl')}:natives-windows")
+	include(runtimeOnly "org.lwjgl:lwjgl-zstd:${prop('lwjgl')}:natives-linux")
+	include(runtimeOnly "org.lwjgl:lwjgl-zstd:${prop('lwjgl')}:natives-macos-arm64")
+	include(runtimeOnly "org.lwjgl:lwjgl-lz4:${prop('lwjgl')}:natives-windows")
+	include(runtimeOnly "org.lwjgl:lwjgl-lz4:${prop('lwjgl')}:natives-linux")
+	include(runtimeOnly "org.lwjgl:lwjgl-lz4:${prop('lwjgl')}:natives-macos-arm64")
+	if (shipAllPlatforms) {
+		runtimeOnly "org.lwjgl:lwjgl:${prop('lwjgl')}:natives-linux-arm64"
+		include(runtimeOnly "org.lwjgl:lwjgl-zstd:${prop('lwjgl')}:natives-linux-arm64")
+		include(runtimeOnly "org.lwjgl:lwjgl-lz4:${prop('lwjgl')}:natives-linux-arm64")
+	}
+}
+
+loom {
+	splitEnvironmentSourceSets()
+
+	mods {
+		"infinite" {
+			sourceSet sourceSets.main
+			sourceSet sourceSets.client
+		}
+	}
+
+	accessWidenerPath = file("src/main/resources/infinite.accesswidener")
+}
+
+// The client source set only exists after Loom splits it above.
+dependencies {
+	clientCompileOnly "maven.modrinth:modmenu:21.0.0"
+}
+
+tasks.withType(JavaCompile).configureEach {
+	it.options.encoding = "UTF-8"
+	it.options.release = targetJava
+	it.options.deprecation = true
+}
+
+java {
+	def required = JavaVersion.toVersion(targetJava)
+	if (JavaVersion.current() < required) {
+		toolchain.languageVersion = JavaLanguageVersion.of(targetJava)
+	}
+}
+
+jar {
+	from("LICENSE") {
+		rename { "${it}_${project.name}" }
+	}
+
+	doFirst {
+		delete fileTree(destinationDirectory.get())
+	}
+}

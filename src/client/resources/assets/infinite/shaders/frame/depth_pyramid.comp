@@ -1,0 +1,34 @@
+// Builds one mip level of the occlusion depth pyramid
+
+layout(local_size_x = 8, local_size_y = 8) in;
+
+layout(binding = 0) uniform sampler2D source;
+layout(binding = 1, r32f) uniform restrict writeonly image2D target;
+
+layout(location = 0) uniform ivec2 targetSize;
+layout(location = 1) uniform ivec2 sourceSize;
+
+float farther(float a, float b) {
+#ifdef USE_REVERSE_Z
+    return min(a, b);
+#else
+    return max(a, b);
+#endif
+}
+
+
+void main() {
+    ivec2 texel = ivec2(gl_GlobalInvocationID.xy);
+    if (texel.x >= targetSize.x || texel.y >= targetSize.y) {
+        return;
+    }
+    ivec2 from = texel * sourceSize / targetSize;
+    ivec2 to = min(((texel + 1) * sourceSize + targetSize - 1) / targetSize, sourceSize) - 1;
+    float depth = texelFetch(source, from, 0).r;
+    for (int y = from.y; y <= to.y; y++) {
+        for (int x = from.x; x <= to.x; x++) {
+            depth = farther(depth, texelFetch(source, ivec2(x, y), 0).r);
+        }
+    }
+    imageStore(target, texel, vec4(depth));
+}

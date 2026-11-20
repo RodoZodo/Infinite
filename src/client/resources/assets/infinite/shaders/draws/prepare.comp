@@ -1,0 +1,41 @@
+// Resets the draw list counters for this frame and sizes the passes that run over the selected sections
+
+#import <infinite:draws/draw_lists.glsl>
+
+layout(local_size_x = 1) in;
+
+
+// Block capacities per opaque list
+
+layout(location = 0) uniform uint solidCapacity;
+layout(location = 1) uniform uint maskedCapacity;
+layout(location = 2) uniform uint newlyVisibleCapacity;
+
+void main() {
+    uint sections = selectedTotal();
+    generateGroups = uvec3((sections + GENERATE_GROUP - 1u) / GENERATE_GROUP, 1u, 1u);
+    translucentCount = 0u;
+    translucentSections = 0u;
+    skirtCount = 0u;
+    solidBlocks = 0u;
+    maskedBlocks = 0u;
+    newlySolidBlocks = 0u;
+    newlyMaskedBlocks = 0u;
+    solidQuads = 0u;
+    maskedQuads = 0u;
+    newlySolidQuads = 0u;
+    newlyMaskedQuads = 0u;
+    solidBlockCapacity = solidCapacity;
+    maskedBlockCapacity = maskedCapacity;
+    newlyVisibleBlockCapacity = newlyVisibleCapacity;
+    //The lists sit one after another in the block buffer
+    newlySolidBase = solidCapacity + maskedCapacity;
+    newlyMaskedBase = newlySolidBase + newlyVisibleCapacity;
+    //Every instance draws one block: its quads index from 0, and each list's blocks start at its region
+    solidDraw = DrawCommand(BLOCK_QUADS * 6u, 0u, 0u, 0, 0u);
+    maskedDraw = DrawCommand(BLOCK_QUADS * 6u, 0u, 0u, 0, solidCapacity);
+    newlySolidDraw = DrawCommand(BLOCK_QUADS * 6u, 0u, 0u, 0, newlySolidBase);
+    newlyMaskedDraw = DrawCommand(BLOCK_QUADS * 6u, 0u, 0u, 0, newlyMaskedBase);
+    //One instance of the 36 index box per selected section
+    occlusionDraw = DrawCommand(36u, sections, 0u, 0, 0u);
+}

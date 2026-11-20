@@ -1,0 +1,36 @@
+{
+  "required": true,
+  "package": "rodozodo.infinite.client.hook",
+  "compatibilityLevel": "JAVA_25",
+  "client": [
+    "minecraft.ClientChunkCacheAccess",
+    "minecraft.FrontendGpuDeviceAccess",
+    "minecraft.ClientLevelHook",
+    "minecraft.ClientPacketListenerHook",
+    "minecraft.DebugScreenEntryListHook",
+    "minecraft.FogRendererHook",
+    "minecraft.IntegratedServerHook",
+    "minecraft.LevelExtractorHook",
+    "minecraft.LevelRendererHook",
+    "minecraft.MinecraftHook",
+    "minecraft.RenderSystemHook",
+    "minecraft.vulkan.VulkanDeviceAccess",
+    "minecraft.vulkan.VulkanFeatureSetsHook",
+    "sodium.SodiumWorldRendererAccess",
+    "sodium.ChunkJobQueueHook",
+    "sodium.DefaultChunkRendererHook",
+    "sodium.FallbackVisibleChunkCollectorHook",
+    "sodium.RenderRegionManagerHook",
+    "sodium.RenderSectionManagerHook",
+    "sodium.ScrollableTooltipHook",
+    "sodium.SodiumWorldRendererHook",
+    "sodium.VisibleChunkCollectorHook"
+  ],
+  "injectors": {
+    "defaultRequire": 1
+  },
+  "plugin": "rodozodo.infinite.client.hook.InfiniteMixinPlugin",
+  "overwrites": {
+    "requireAnnotations": true
+  }
+}

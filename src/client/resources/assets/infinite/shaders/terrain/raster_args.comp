@@ -1,0 +1,49 @@
+// Computes indirect dispatch arguments for the software rasteriser and resets its fallback draw
+
+#import <infinite:draws/draw_lists.glsl>
+
+layout(local_size_x = 1) in;
+
+layout(binding = 2, std430) restrict writeonly buffer RasterArgs {
+    uvec4 rasterArgs[];
+};
+
+layout(binding = 3, std430) restrict writeonly buffer FallbackDraws {
+    uint fallbackDraws[];
+};
+
+#ifdef WINNER_LIST
+layout(binding = 4, std430) restrict writeonly buffer Winners {
+    uint winners[];
+};
+#endif
+
+layout(location = 0) uniform uint rasterPass;
+
+const uint ROW_GROUPS = 1024u;
+
+void main() {
+    DrawCommand solid = rasterPass == 0u ? solidDraw : newlySolidDraw;
+    DrawCommand masked = rasterPass == 0u ? maskedDraw : newlyMaskedDraw;
+    uint blocks = solid.instanceCount + masked.instanceCount;
+    uint groups = (blocks * BLOCK_QUADS + RASTER_GROUP - 1u) / RASTER_GROUP;
+    uint rows = (groups + ROW_GROUPS - 1u) / ROW_GROUPS;
+    rasterArgs[rasterPass * 2u] = uvec4(min(groups, ROW_GROUPS), rows, 1u, blocks);
+    rasterArgs[rasterPass * 2u + 1u] = uvec4(solid.instanceCount, solid.firstInstance, masked.instanceCount, masked.firstInstance);
+    uint solidGroups = (solid.instanceCount * BLOCK_QUADS + SOLID_GROUP - 1u) / SOLID_GROUP;
+    uint maskedGroups = (masked.instanceCount * BLOCK_QUADS + RASTER_GROUP - 1u) / RASTER_GROUP;
+    rasterArgs[4u + rasterPass] = uvec4(min(solidGroups, ROW_GROUPS), (solidGroups + ROW_GROUPS - 1u) / ROW_GROUPS, 1u,
+            solid.instanceCount);
+    rasterArgs[6u + rasterPass] = uvec4(min(maskedGroups, ROW_GROUPS), (maskedGroups + ROW_GROUPS - 1u) / ROW_GROUPS, 1u,
+            masked.instanceCount);
+    uint at = rasterPass * 8u;
+    fallbackDraws[at] = 6u;
+    fallbackDraws[at + 1u] = 0u;
+    fallbackDraws[at + 2u] = 0u;
+    fallbackDraws[at + 3u] = 0u;
+    fallbackDraws[at + 4u] = rasterPass * FALLBACK_CAPACITY;
+    fallbackDraws[at + 5u] = 0u;
+#ifdef WINNER_LIST
+    winners[3] = 0u;
+#endif
+}

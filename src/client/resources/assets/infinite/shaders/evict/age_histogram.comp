@@ -1,0 +1,28 @@
+// Counts the eviction candidates per age bucket
+
+#import <infinite:evict/eviction.glsl>
+
+#define GROUP_SIZE 256u
+const uint NODES_PER_GROUP = GROUP_SIZE * 8u;
+
+layout(local_size_x = 256) in;
+
+shared uint localHistogram[AGE_BUCKETS];
+
+void main() {
+    uint lane = gl_LocalInvocationID.x;
+    for (uint bucket = lane; bucket < AGE_BUCKETS; bucket += GROUP_SIZE) localHistogram[bucket] = 0u;
+    barrier();
+
+    uint first = gl_WorkGroupID.x * NODES_PER_GROUP;
+    for (uint nodeId = first + lane; nodeId < min(first + NODES_PER_GROUP, nodeCount); nodeId += GROUP_SIZE) {
+        uint bucket = ageBucket(nodeId);
+        if (bucket != NOT_EVICTABLE) atomicAdd(localHistogram[bucket], 1u);
+    }
+    barrier();
+
+    for (uint bucket = lane; bucket < AGE_BUCKETS; bucket += GROUP_SIZE) {
+        uint count = localHistogram[bucket];
+        if (count != 0u) atomicAdd(histogram[bucket], count);
+    }
+}

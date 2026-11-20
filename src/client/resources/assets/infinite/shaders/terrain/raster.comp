@@ -1,0 +1,353 @@
+// Software rasterizes LOD quads into the visibility buffer, deferring clipped or oversized quads to hardware fallback
+
+#ifndef VISIBILITY_SPLIT
+#extension GL_EXT_shader_explicit_arithmetic_types_int64 : require
+#extension GL_EXT_shader_atomic_int64 : require
+#endif
+#import <infinite:terrain/visibility.glsl>
+#if defined(CLAIM_PASS) && defined(NEW_TILES)
+#define NEW_TILES_CLAIM
+#import <infinite:terrain/new_tiles.glsl>
+#endif
+
+layout(local_size_x = RASTER_GROUP) in;
+
+layout(binding = 2) uniform sampler2D vanillaMask;
+layout(binding = 4) uniform sampler2D border;
+
+#ifdef RASTER_STATS
+layout(binding = 8, std430) restrict buffer RasterArgs {
+#else
+layout(binding = 8, std430) restrict readonly buffer RasterArgs {
+#endif
+    uvec4 rasterArgs[];
+};
+
+layout(binding = 9, std430) restrict buffer FallbackDraws {
+    uint fallbackDraws[];
+};
+
+layout(binding = 10, std430) restrict writeonly buffer FallbackBlocks {
+    uvec2 fallbackBlocks[];
+};
+
+#ifdef VISIBILITY_SPLIT
+#ifdef CLAIM_PASS
+layout(binding = 11, std430) restrict readonly buffer Winners {
+#else
+layout(binding = 11, std430) restrict buffer Winners {
+#endif
+    uint winners[];
+};
+const uint WINNER_COUNT = 3u;
+const uint WINNER_FIRST = 8u;
+#endif
+
+#if defined(RASTER_STATS) && !defined(CLAIM_PASS)
+const uint STATS_WORD = 8u;
+const uint STATS_STRIPES = 8u;
+shared uint statWalkedQuads, statHiddenQuads, statDepthQuads, statOtherQuads, statEmptyQuads;
+shared uint statOutcomes[RASTER_GROUP];
+#ifdef STATS_BLOCKS
+const uint STAT_BLOCK = 16u;
+shared uint statWalkedBlocks, statHiddenBlocks, statDepthBlocks, statDepthEmptyBlocks, statOtherBlocks,
+        statEmptyBlocks;
+#endif
+#endif
+
+layout(location = 0) uniform ivec2 screen;
+layout(location = 1) uniform uint rasterPass;
+
+const float LEAST_W = 0.01;
+
+float edge(vec2 a, vec2 b, vec2 p) {
+    return (b.x - a.x) * (p.y - a.y) - (b.y - a.y) * (p.x - a.x);
+}
+
+void fallBack(uint quadIndex, uint drawSlot) {
+    uint at = atomicAdd(fallbackDraws[rasterPass * 8u + 5u], 1u);
+    if (at >= FALLBACK_CAPACITY) return;
+    fallbackBlocks[rasterPass * FALLBACK_CAPACITY + at] = uvec2(quadIndex, drawSlot);
+    atomicMax(fallbackDraws[rasterPass * 8u + 1u], at + 1u);
+}
+
+struct Triangle {
+    vec2 a, b, c;
+    vec3 depth; // Depth at a, dz/dx, dz/dy
+    float facing;
+    mat3 inverseCorners;
+};
+
+Triangle triangle(vec4 clipA, vec4 clipB, vec4 clipC, vec2 a, vec2 b, vec2 c, vec3 z) {
+    Triangle t;
+    t.a = a;
+    t.b = b;
+    t.c = c;
+    float area = edge(a, b, c);
+    t.facing = area > 0.0 ? 1.0 : (area < 0.0 ? -1.0 : 0.0);
+    float inverseArea = area != 0.0 ? 1.0 / area : 0.0;
+    float dzdx = ((z.y - z.x) * (c.y - a.y) - (z.z - z.x) * (b.y - a.y)) * inverseArea;
+    float dzdy = ((z.z - z.x) * (b.x - a.x) - (z.y - z.x) * (c.x - a.x)) * inverseArea;
+    t.depth = vec3(z.x, dzdx, dzdy);
+    t.inverseCorners = cornerMatrix(clipA, clipB, clipC);
+    return t;
+}
+
+bool covers(Triangle t, vec2 p) {
+    return t.facing != 0.0 && t.facing * edge(t.a, t.b, p) >= 0.0 && t.facing * edge(t.b, t.c, p) >= 0.0
+            && t.facing * edge(t.c, t.a, p) >= 0.0;
+}
+
+float depthAt(Triangle t, vec2 p) {
+    return t.depth.x + t.depth.y * (p.x - t.a.x) + t.depth.z * (p.y - t.a.y);
+}
+
+vec2 faceUvAt(Triangle t, vec2 uvA, vec2 uvB, vec2 uvC, vec2 p) {
+    vec3 weights = barycentrics(t.inverseCorners, p / vec2(screen) * 2.0 - 1.0);
+    return weights.x * uvA + weights.y * uvB + weights.z * uvC;
+}
+
+
+// Separated from main() so every workgroup lane reaches the stats barriers
+uint rasterize() {
+    uint group = gl_WorkGroupID.y * gl_NumWorkGroups.x + gl_WorkGroupID.x;
+    uint thread = group * RASTER_GROUP + gl_LocalInvocationID.x;
+#if defined(CLAIM_PASS) && defined(CLAIM_LIST)
+    if (thread >= min(winners[WINNER_COUNT], WINNER_CAPACITY)) return 0u;
+    uint place = winners[WINNER_FIRST + thread] - 1u;
+    uint slot = place / BLOCK_QUADS;
+    uint withinBlock = place % BLOCK_QUADS;
+    uvec2 block = drawBlocks[slot];
+#else
+    uvec4 lists = rasterArgs[rasterPass * 2u + 1u];
+    uint blockNumber = thread / BLOCK_QUADS;
+    uint withinBlock = thread % BLOCK_QUADS;
+#if defined(SOLID_LIST)
+    if (blockNumber >= lists.x) return 0u;
+    uint slot = lists.y + blockNumber;
+#elif defined(MASKED_LIST)
+    if (blockNumber >= lists.z) return 0u;
+    uint slot = lists.w + blockNumber;
+#else
+    uvec4 size = rasterArgs[rasterPass * 2u];
+    if (blockNumber >= size.w) return 0u;
+    uint slot = blockNumber < lists.x ? lists.y + blockNumber : lists.w + (blockNumber - lists.x);
+#endif
+    uvec2 block = drawBlocks[slot];
+    if (withinBlock > (block.y >> 22)) return 0u;
+#endif
+    uint quadIndex = block.x + withinBlock;
+    uint drawSlot = block.y & 0x3FFFFFu;
+    QuadSetup quad = setupQuad(quadIndex, drawSlot);
+    if (quadTurnedAway(quad)) return 0u;
+
+    vec4 clip[4];
+    vec2 faceUv[4];
+    vec2 corner[4];
+    float z[4];
+    bool tooNear = false;
+    for (uint c = 0u; c < 4u; c++) {
+        clip[c] = viewProjection * vec4(quadCorner(quad, c, faceUv[c]), 1.0);
+        tooNear = tooNear || clip[c].w < LEAST_W;
+    }
+    if (tooNear) {
+#ifndef CLAIM_PASS
+        fallBack(quadIndex, drawSlot);
+#endif
+        return 0u;
+    }
+    for (uint c = 0u; c < 4u; c++) {
+        vec3 ndc = clip[c].xyz / clip[c].w;
+        corner[c] = ndcToUv(ndc.xy) * vec2(screen);
+        z[c] = ndcToDepth(ndc.z);
+    }
+    vec2 least = min(min(corner[0], corner[1]), min(corner[2], corner[3]));
+    vec2 most = max(max(corner[0], corner[1]), max(corner[2], corner[3]));
+    ivec2 from = max(ivec2(ceil(least - 0.5)), ivec2(0));
+    ivec2 to = min(ivec2(floor(most - 0.5)), screen - 1);
+    if (any(greaterThan(from, to))) return 0u;
+    if ((to.x - from.x + 1) * (to.y - from.y + 1) > MOST_PIXELS) {
+#ifndef CLAIM_PASS
+        fallBack(quadIndex, drawSlot);
+#endif
+        return 0u;
+    }
+
+    Triangle first = triangle(clip[1], clip[2], clip[0], corner[1], corner[2], corner[0], vec3(z[1], z[2], z[0]));
+    bool planar = curveDrop <= 0.0 && !quad.corners && first.facing != 0.0;
+    Triangle second = first;
+    if (!planar) second = triangle(clip[1], clip[3], clip[2], corner[1], corner[3], corner[2], vec3(z[1], z[3], z[2]));
+    uint payload = slot * BLOCK_QUADS + withinBlock + 1u;
+    bool won = false;
+#if defined(RASTER_STATS) && !defined(CLAIM_PASS)
+    bool anyInRange = false;
+    bool anyDepthPass = false;
+#endif
+#if !defined(CLAIM_PASS) && !defined(SOLID_LIST)
+    QuadFlats flats = quadFlats(quad);
+    bool masked = flats.nearVanilla != 0u;
+    bool nearVanilla = (flats.nearVanilla & 1u) != 0u;
+    uint fade = flats.nearVanilla >> 8;
+    bool leaf = (flats.modelBits & MODEL_LEAF) != 0u;
+#ifdef SOLID_PLANTS
+    bool cutout = false;
+#else
+    bool cutout = (flats.faceFlags & 1u) != 0u && !(leaf && flats.voxelBlocks >= 4.0);
+#endif
+#endif
+    for (int y = from.y; y <= to.y; y++) {
+        for (int x = from.x; x <= to.x; x++) {
+            vec2 p = vec2(x, y) + 0.5;
+            bool inFirst = true;
+            if (planar) {
+                float facing = first.facing;
+                if (!(facing * edge(corner[0], corner[1], p) >= 0.0 && facing * edge(corner[1], corner[3], p) >= 0.0
+                        && facing * edge(corner[3], corner[2], p) >= 0.0 && facing * edge(corner[2], corner[0], p) >= 0.0)) {
+                    continue;
+                }
+            } else {
+                inFirst = covers(first, p);
+                if (!inFirst && !covers(second, p)) continue;
+            }
+            Triangle t = inFirst ? first : second;
+            float depth = depthAt(t, p);
+            if (depth < 0.0 || depth > 1.0) continue;
+#if defined(RASTER_STATS) && !defined(CLAIM_PASS)
+            anyInRange = true;
+#endif
+            uint index = uint(y) * uint(screen.x) + uint(x);
+            uint key = depthKey(depth);
+#ifdef CLAIM_PASS
+            if (visibilityKeyAt(index) != key) continue;
+            visibilityClaim(index, key, payload);
+#ifdef NEW_TILES
+            markNewTile(uvec2(x, y), screen);
+#endif
+#else
+            if (key <= visibilityKeyAt(index)) continue;
+#if defined(RASTER_STATS)
+            anyDepthPass = true;
+#endif
+#ifndef SOLID_LIST
+            if (masked) {
+                if (fade != 0u && fadedOut(fade, p)) continue;
+                if (nearVanilla) {
+                    ivec2 pixel = ivec2(x, y);
+                    bool dissolved = texelFetch(border, pixel, 0).r > 0.0;
+
+                    // Test unjittered pixel-center depth to align with the vanilla mask
+                    float centreDepth = depthAt(t, p + jitterPixels);
+                    if (!dissolved && depthNearer(centreDepth, texelFetch(vanillaMask, pixel >> VANILLA_MASK_SHIFT, 0).r)) continue;
+                    if (dissolved && flats.voxelBlocks > 1.0) continue;
+                    if ((flats.nearVanilla & 2u) != 0u && withinVanillaDistance(p, vec2(screen), depth)) continue;
+                }
+            }
+            if (cutout) {
+                vec2 uvA = faceUv[1];
+                vec2 uvB = inFirst ? faceUv[2] : faceUv[3];
+                vec2 uvC = inFirst ? faceUv[0] : faceUv[2];
+                if (cutAway(flats, faceUvAt(t, uvA, uvB, uvC, p), faceUvAt(t, uvA, uvB, uvC, p + vec2(1.0, 0.0)),
+                        faceUvAt(t, uvA, uvB, uvC, p + vec2(0.0, 1.0)))) {
+                    continue;
+                }
+            }
+#endif
+            visibilityKeep(index, key, payload);
+            won = true;
+#endif
+        }
+    }
+#if defined(VISIBILITY_SPLIT) && !defined(CLAIM_PASS)
+    if (won) {
+        uint at = atomicAdd(winners[WINNER_COUNT], 1u);
+        if (at < WINNER_CAPACITY) winners[WINNER_FIRST + at] = payload;
+    }
+#endif
+#ifdef CLAIM_PASS
+    return 1u;
+#elif defined(RASTER_STATS)
+    if (won) return 3u;
+    return 1u | (anyDepthPass ? 8u : (anyInRange ? 4u : 16u));
+#else
+    return 1u | (won ? 2u : 0u);
+#endif
+}
+
+void main() {
+    uint outcome = rasterize();
+#if defined(RASTER_STATS) && !defined(CLAIM_PASS)
+    uint lane = gl_LocalInvocationID.x;
+    if (lane == 0u) {
+        statWalkedQuads = 0u;
+        statHiddenQuads = 0u;
+        statDepthQuads = 0u;
+        statOtherQuads = 0u;
+        statEmptyQuads = 0u;
+#ifdef STATS_BLOCKS
+        statWalkedBlocks = 0u;
+        statHiddenBlocks = 0u;
+        statDepthBlocks = 0u;
+        statDepthEmptyBlocks = 0u;
+        statOtherBlocks = 0u;
+        statEmptyBlocks = 0u;
+#endif
+    }
+    statOutcomes[lane] = outcome;
+    barrier();
+    if ((outcome & 1u) != 0u) {
+        atomicAdd(statWalkedQuads, 1u);
+        if ((outcome & 2u) == 0u) {
+            atomicAdd(statHiddenQuads, 1u);
+            if ((outcome & 4u) != 0u) atomicAdd(statDepthQuads, 1u);
+            else if ((outcome & 8u) != 0u) atomicAdd(statOtherQuads, 1u);
+            else atomicAdd(statEmptyQuads, 1u);
+        }
+    }
+#ifdef STATS_BLOCKS
+    if (lane % STAT_BLOCK == 0u && lane + STAT_BLOCK <= RASTER_GROUP) {
+        bool walked = false;
+        bool kept = false;
+        bool other = false;
+        bool depth = false;
+        bool empty = false;
+        for (uint i = 0u; i < STAT_BLOCK; i++) {
+            uint o = statOutcomes[lane + i];
+            walked = walked || (o & 1u) != 0u;
+            kept = kept || (o & 2u) != 0u;
+            other = other || (o & 8u) != 0u;
+            depth = depth || (o & 4u) != 0u;
+            empty = empty || (o & 16u) != 0u;
+        }
+        if (walked) {
+            atomicAdd(statWalkedBlocks, 1u);
+            if (!kept) {
+                atomicAdd(statHiddenBlocks, 1u);
+                if (other) atomicAdd(statOtherBlocks, 1u);
+                else if (depth && empty) atomicAdd(statDepthEmptyBlocks, 1u);
+                else if (depth) atomicAdd(statDepthBlocks, 1u);
+                else atomicAdd(statEmptyBlocks, 1u);
+            }
+        }
+    }
+#endif
+    barrier();
+    if (lane == 0u) {
+        uint group = gl_WorkGroupID.y * gl_NumWorkGroups.x + gl_WorkGroupID.x;
+        uint at = STATS_WORD + (rasterPass * STATS_STRIPES + (group & (STATS_STRIPES - 1u))) * 3u;
+        atomicAdd(rasterArgs[at].x, statWalkedQuads);
+        atomicAdd(rasterArgs[at].y, statHiddenQuads);
+        atomicAdd(rasterArgs[at + 1u].x, statDepthQuads);
+        atomicAdd(rasterArgs[at + 1u].y, statOtherQuads);
+        atomicAdd(rasterArgs[at + 1u].z, statEmptyQuads);
+
+#ifdef STATS_BLOCKS
+        atomicAdd(rasterArgs[at].z, statWalkedBlocks);
+        atomicAdd(rasterArgs[at].w, statHiddenBlocks);
+        atomicAdd(rasterArgs[at + 1u].w, statDepthBlocks);
+        atomicAdd(rasterArgs[at + 2u].x, statDepthEmptyBlocks);
+        atomicAdd(rasterArgs[at + 2u].y, statOtherBlocks);
+        atomicAdd(rasterArgs[at + 2u].z, statEmptyBlocks);
+#endif
+    }
+#endif
+}

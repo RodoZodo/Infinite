@@ -1,0 +1,21 @@
+
+#import <infinite:evict/eviction.glsl>
+
+layout(local_size_x = 256) in;
+
+layout(binding = 3, std430) restrict writeonly buffer Evicted {
+    uvec2 evicted[MOST_BATCH];// Node positions
+};
+
+const uint EVICTION_GRACE_FRAMES = 60u;
+
+void main() {
+    uint nodeId = gl_GlobalInvocationID.x;
+    if (nodeId >= nodeCount) return;
+    uint bucket = ageBucket(nodeId);
+    if (bucket == NOT_EVICTABLE || bucket < thresholdBucket) return;
+    uint slot = bucket > thresholdBucket ? atomicAdd(olderTaken, 1u) : olderCount + atomicAdd(thresholdTaken, 1u);
+    if (slot >= batch) return;
+    evicted[slot] = nodes[nodeId].xy;
+    lastSeen[nodeId] = frame + EVICTION_GRACE_FRAMES;
+}

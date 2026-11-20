@@ -1,0 +1,29 @@
+
+
+layout(local_size_x = 1) in;
+
+layout(binding = 0, std430) restrict readonly buffer RasterArgs {
+    uvec4 rasterArgs[];
+};
+
+layout(binding = 1, std430) restrict buffer Winners {
+    uint winners[];
+};
+
+layout(location = 0) uniform uint rasterPass; // 0: cached lists, 1: newly visible lists
+
+const uint ROW_GROUPS = 1024u;
+
+void main() {
+    uint count = winners[3];
+    bool fits = count <= WINNER_CAPACITY;
+    uint groups = fits ? (count + CLAIM_GROUP - 1u) / CLAIM_GROUP : 0u;
+    winners[0] = min(groups, ROW_GROUPS);
+    winners[1] = (groups + ROW_GROUPS - 1u) / ROW_GROUPS;
+    winners[2] = 1u;
+    uvec4 every = rasterArgs[rasterPass * 2u];
+    winners[4] = fits ? 0u : every.x;
+    winners[5] = fits ? 0u : every.y;
+    winners[6] = 1u;
+    if (rasterPass == 0u) winners[7] = count;
+}

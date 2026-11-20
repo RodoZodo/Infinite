@@ -1,0 +1,45 @@
+{
+  "schemaVersion": 1,
+  "id": "infinite",
+  "name": "Infinite",
+  "version": "${version}",
+  "description": "Ultimate LOD mod for Minecraft's Vulkan API.",
+  "icon": "assets/infinite/icon.png",
+  "license": "LGPL-3.0-only",
+  "authors": [
+    "RodoZodo"
+  ],
+  "contact": {
+    "sources": "https://github.com/RodoZodo/Infinite"
+  },
+  "environment": "client",
+  "entrypoints": {
+    "client": [
+      "rodozodo.infinite.client.InfiniteClient"
+    ],
+    "sodium:config_api_user": [
+      "rodozodo.infinite.client.config.SettingsMenu"
+    ],
+    "modmenu": [
+      "rodozodo.infinite.client.config.ModMenuIntegration"
+    ]
+  },
+  "mixins": [
+    "infinite.mixins.json",
+    {
+      "config": "infinite.client.mixins.json",
+      "environment": "client"
+    }
+  ],
+  "accessWidener": "infinite.accesswidener",
+  "suggests": {
+    "modmenu": "*"
+  },
+  "depends": {
+    "fabricloader": ">=0.19.5",
+    "fabric-api": ">=0.164.0",
+    "minecraft": "${minecraft_versions}",
+    "sodium": "${sodium_versions}",
+    "java": ">=25"
+  }
+}
