@@ -853,7 +853,9 @@ public final class SectionMesher {
     }
 
     private long fluidFace(int voxel, int other, int face) {
-        if (ModelInfo.occludes(this.meta(other), face ^ 1)) return 0;
+        long otherInfo = this.meta(other);
+        // Vanilla draws no water against ice or glass, so none shows through it
+        if (ModelInfo.occludes(otherInfo, face ^ 1) || ModelInfo.translucent(otherInfo) && !ModelInfo.isFluid(otherInfo)) return 0;
         int id = this.fluidModel(voxel);
         if (id != this.model(voxel) && ModelInfo.occludes(this.meta(voxel), face)) return 0;
         long value = this.cellValue(id, this.models.info(id), voxel, this.fluidLight(voxel), this.fluidFlow(id, voxel, face));

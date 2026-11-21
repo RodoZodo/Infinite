@@ -36,7 +36,10 @@ void main() {
 #ifdef SKIRTS
     if (!fluidSkirt(quad) || skirtUnwanted(quad)) {
 #else
-    if (fluidSkirt(quad)) {
+    uvec2 section = drawPositions[drawSlot];
+    bool turnedAway = (quad.model.flags & (MODEL_FLUID | MODEL_TWO_SIDED | MODEL_PLANT)) == 0u && !facesCamera(quad.quad.face,
+            lodPosition(section) - (cameraSection >> lodLevel(section)), quad.sectionOrigin - cameraOffset, lodLevel(section));
+    if (fluidSkirt(quad) || turnedAway) {
 #endif
         gl_Position = vec4(0.0, 0.0, 2.0, 1.0);
         return;
