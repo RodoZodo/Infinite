@@ -827,8 +827,8 @@ public final class SectionMesher {
             }
         }
         long faced = STAGES ? System.nanoTime() : 0;
+        if (anyFluids) this.mergeFace(face, true); // Fluids first so water under ice or galss is drawn before the face covering it
         if (any) this.mergeFace(face, false);
-        if (anyFluids) this.mergeFace(face, true);
         if (STAGES) {
             STAGE_FACES.add(faced - started);
             STAGE_MERGE.add(System.nanoTime() - faced);
@@ -855,10 +855,12 @@ public final class SectionMesher {
     private long fluidFace(int voxel, int other, int face) {
         long otherInfo = this.meta(other);
         // Vanilla draws no water against ice or glass, so none shows through it
-        if (ModelInfo.occludes(otherInfo, face ^ 1) || ModelInfo.translucent(otherInfo) && !ModelInfo.isFluid(otherInfo)) return 0;
+        if (ModelInfo.occludes(otherInfo, face ^ 1)) return 0;
         int id = this.fluidModel(voxel);
         if (id != this.model(voxel) && ModelInfo.occludes(this.meta(voxel), face)) return 0;
-        long value = this.cellValue(id, this.models.info(id), voxel, this.fluidLight(voxel), this.fluidFlow(id, voxel, face));
+        int light = this.fluidLight(voxel);
+        if (ModelInfo.translucent(otherInfo) && !ModelInfo.isFluid(otherInfo)) light = light >> 1 & 0x77;
+        long value = this.cellValue(id, this.models.info(id), voxel, light, this.fluidFlow(id, voxel, face));
         return this.level == 0 && face != 0 ? this.withCorners(value, id, voxel, face) : value;
     }
 
