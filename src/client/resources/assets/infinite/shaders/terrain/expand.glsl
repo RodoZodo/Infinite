@@ -164,6 +164,7 @@ vec3 quadCorner(QuadSetup s, uint corner, out vec2 faceUv) {
         vec2 span = extent.zw - start + vec2(quad.size - 1u) + vec2(GROW);
         vec2 uv = start + span * cornerUv;
         float inset = fills ? 0.0 : faceInset(s.faceWord);
+        if ((model.flags & MODEL_FLUID) != 0u) inset = round(inset * 9.0) / 9.0;
         float depth = (quad.face & 1u) == 0u ? inset : 1.0 - inset;
         vec3 local = alongFace(faceAxis(quad.face), uv, depth);
         if (s.corners) {
