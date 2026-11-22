@@ -18,6 +18,7 @@ const uint FLUID_CORNERS = 64u;
 
 
 const uint FLUID_SKIRT = 32u;
+const uint FLUID_COVERED = 16u;
 const float FLUID_HEIGHTS[8] = float[8](0.0, 1.0 / 6.0, 1.0 / 3.0, 0.5, 2.0 / 3.0, 7.0 / 9.0, 8.0 / 9.0, 1.0);
 
 Quad unpackQuad(uvec2 packed) {

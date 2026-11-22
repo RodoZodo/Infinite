@@ -218,6 +218,8 @@ QuadFlats quadFlats(QuadSetup s) {
     uint lookFace = skirt ? 1u : quad.face;
     float facing = plant ? faceShade.x : directionalShade(modelShaded(model), lookFace);
     f.shade = lightColour(quad.light) * facing;
+    // Fluid under ice: vanilla's ambient occlusion shades it to a fifth
+    if ((model.flags & MODEL_FLUID) != 0u && (quad.occlusion & (FLUID_COVERED | FLUID_CORNERS)) == FLUID_COVERED) f.shade *= 0.2;
     f.tint = unpackRgb(modelTintFromBiome(model) ? biomeTints[model.tint + quad.biome] : model.tint);
     f.aoTable = 0u;
     if (plant) {

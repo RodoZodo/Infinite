@@ -42,6 +42,7 @@ public final class SectionMesher {
 
     // Bit 62: fluid skirt drawn only beside finer neighbors (select/select.comp).
     static final long FLUID_SKIRT = 1L << 62;
+    static final long FLUID_COVERED = 1L << 61;
 
     // Matches terrain/quad.glsl height table.
     private static final float[] FLUID_HEIGHTS = {0f, 1f / 6, 1f / 3, 1f / 2, 2f / 3, 7f / 9, 8f / 9, 1f};
@@ -827,7 +828,8 @@ public final class SectionMesher {
             }
         }
         long faced = STAGES ? System.nanoTime() : 0;
-        if (anyFluids) this.mergeFace(face, true); // Fluids first so water under ice or galss is drawn before the face covering it
+        // Fluids first, so water under ice or glass is drawn before the face that covers it
+        if (anyFluids) this.mergeFace(face, true);
         if (any) this.mergeFace(face, false);
         if (STAGES) {
             STAGE_FACES.add(faced - started);
@@ -854,13 +856,11 @@ public final class SectionMesher {
 
     private long fluidFace(int voxel, int other, int face) {
         long otherInfo = this.meta(other);
-        // Vanilla draws no water against ice or glass, so none shows through it
         if (ModelInfo.occludes(otherInfo, face ^ 1)) return 0;
         int id = this.fluidModel(voxel);
         if (id != this.model(voxel) && ModelInfo.occludes(this.meta(voxel), face)) return 0;
-        int light = this.fluidLight(voxel);
-        if (ModelInfo.translucent(otherInfo) && !ModelInfo.isFluid(otherInfo)) light = light >> 1 & 0x77;
-        long value = this.cellValue(id, this.models.info(id), voxel, light, this.fluidFlow(id, voxel, face));
+        long value = this.cellValue(id, this.models.info(id), voxel, this.fluidLight(voxel), this.fluidFlow(id, voxel, face));
+        if (ModelInfo.translucent(otherInfo) && !ModelInfo.isFluid(otherInfo)) return value | FLUID_COVERED;
         return this.level == 0 && face != 0 ? this.withCorners(value, id, voxel, face) : value;
     }
 
