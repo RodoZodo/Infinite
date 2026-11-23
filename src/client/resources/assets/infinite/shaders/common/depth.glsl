@@ -13,6 +13,7 @@ const float DEPTH_FAR = 1.0;
 #endif
 
 const float DEPTH_TOWARDS_CAMERA = DEPTH_NEAR - DEPTH_FAR;  // Adding a positive multiple of this moves a depth value towards the camera
+const float VANILLA_MASK_BIAS = 0.0005;
 
 bool depthNearer(float a, float b) {
     return (a - b) * DEPTH_TOWARDS_CAMERA > 0.0;

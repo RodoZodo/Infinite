@@ -60,6 +60,9 @@ void main() {
     shade = flats.shade;
     tint = flats.tint;
     faceFlags = flats.faceFlags;
+    #ifdef TRANSLUCENT
+        if (quad.quad.face < 2u) faceFlags |= 32u;
+    #endif
     liveUv = flats.liveUv;
     liveUvU = flats.liveUvU;
     liveUvV = flats.liveUvV;

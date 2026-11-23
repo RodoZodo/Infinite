@@ -46,5 +46,5 @@ void main() {
         clip.xy += vec2(away.x < 0.0 ? -1.0 : 1.0, away.y < 0.0 ? -1.0 : 1.0) * maskHalfTexel * clip.w;
     }
     gl_Position = clip;
-    gl_Position.z += DEPTH_TOWARDS_CAMERA * 0.0005;
+    gl_Position.z += DEPTH_TOWARDS_CAMERA * VANILLA_MASK_BIAS;
 }

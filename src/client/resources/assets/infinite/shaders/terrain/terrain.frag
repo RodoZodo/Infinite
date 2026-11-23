@@ -61,7 +61,13 @@ void main() {
         ivec2 pixel = ivec2(gl_FragCoord.xy);
         bool dissolved = texelFetch(border, pixel, 0).r > 0.0;
         float centreDepth = gl_FragCoord.z + jitterPixels.x * depthDx + jitterPixels.y * depthDy;
-        if (!dissolved && depthNearer(centreDepth, texelFetch(vanillaMask, pixel >> VANILLA_MASK_SHIFT, 0).r)) {
+        float maskDepth = texelFetch(vanillaMask, pixel >> VANILLA_MASK_SHIFT, 0).r;
+#ifdef TRANSLUCENT
+        if ((faceFlags & 32u) != 0u && maskDepth != DEPTH_NEAR) {
+            maskDepth -= DEPTH_TOWARDS_CAMERA * (ndcToDepth(VANILLA_MASK_BIAS) - ndcToDepth(0.0)) * gl_FragCoord.w;
+        }
+#endif
+        if (!dissolved && depthNearer(centreDepth, maskDepth)) {
 #ifdef TRANSLUCENT
             imageStore(waterCut, pixel, vec4(-1.0));
 #endif
