@@ -15,6 +15,7 @@ public class VisibleChunkCollectorHook {
     @Redirect(method = "visit", at = @At(value = "INVOKE", target = "Lnet/caffeinemc/mods/sodium/client/render/chunk/region/RenderRegionManager;getForChunk(III)Lnet/caffeinemc/mods/sodium/client/render/chunk/region/RenderRegion;"))
     private RenderRegion infinite$report(RenderRegionManager regions, int x, int y, int z) {
         var region = regions.getForChunk(x, y, z);
+        if (region != null && !VisibleVanillaSections.inRenderDistance(x, y, z)) return null;
         VisibleVanillaSections.visit(region, x, y, z);
         return region;
     }

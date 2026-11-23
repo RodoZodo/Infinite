@@ -164,6 +164,7 @@ vec3 quadCorner(QuadSetup s, uint corner, out vec2 faceUv) {
         vec2 span = extent.zw - start + vec2(quad.size - 1u) + vec2(GROW);
         vec2 uv = start + span * cornerUv;
         float inset = fills ? 0.0 : faceInset(s.faceWord);
+        if ((model.flags & MODEL_FLUID) != 0u) inset = round(inset * 9.0) / 9.0;
         float depth = (quad.face & 1u) == 0u ? inset : 1.0 - inset;
         vec3 local = alongFace(faceAxis(quad.face), uv, depth);
         if (s.corners) {
@@ -217,7 +218,8 @@ QuadFlats quadFlats(QuadSetup s) {
     uint lookFace = skirt ? 1u : quad.face;
     float facing = plant ? faceShade.x : directionalShade(modelShaded(model), lookFace);
     f.shade = lightColour(quad.light) * facing;
-    f.tint = unpackRgb(modelTintFromBiome(model) ? biomeTints[model.tint + quad.biome] : model.tint);
+    // Fluid under ice: vanilla's ambient occlusion shades it to a fifth
+    if ((model.flags & MODEL_FLUID) != 0u && quad.face == 1u && (quad.occlusion & (FLUID_COVERED | FLUID_CORNERS)) == FLUID_COVERED) f.shade *= 0.2;    f.tint = unpackRgb(modelTintFromBiome(model) ? biomeTints[model.tint + quad.biome] : model.tint);
     f.aoTable = 0u;
     if (plant) {
         f.faceFlags = 1u | ((model.tint == 0xFFFFFFFFu ? TINT_NEVER : TINT_ALWAYS) << 1);

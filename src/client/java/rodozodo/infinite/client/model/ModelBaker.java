@@ -898,7 +898,7 @@ final class ModelBaker {
 
         boolean occludes = !translucent && wholeSide && depth < 0.1f && shown > 0.9f * FaceRasterizer.PIXELS;
         boolean hideable = depth < 0.3f;
-        boolean selfLit = depth > 0.01f || translucent;
+        boolean selfLit = depth > 0.01f;
         boolean flush = depth <= 0.01f;
         boolean cutout = (word & FACE_ALPHA_CUTOUT) != 0;
         boolean stretchedCutout = (word & FACE_STRETCHED_CUTOUT) != 0;

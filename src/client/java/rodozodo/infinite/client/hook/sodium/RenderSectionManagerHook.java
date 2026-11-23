@@ -7,7 +7,9 @@ import net.caffeinemc.mods.sodium.client.render.chunk.RenderSectionManager;
 import net.caffeinemc.mods.sodium.client.render.chunk.compile.ChunkBuildOutput;
 import net.caffeinemc.mods.sodium.client.render.viewport.Viewport;
 import net.caffeinemc.mods.sodium.client.util.FogParameters;
+import net.minecraft.client.Camera;
 import net.minecraft.client.multiplayer.ClientLevel;
+import rodozodo.infinite.client.render.VisibleVanillaSections;
 import org.spongepowered.asm.mixin.Final;
 import org.spongepowered.asm.mixin.Mixin;
 import org.spongepowered.asm.mixin.Shadow;
@@ -26,6 +28,12 @@ import java.util.List;
 @Mixin(value = RenderSectionManager.class, remap = false)
 public class RenderSectionManagerHook {
     @Shadow @Final private ClientLevel level;
+
+    // Gives the render list filter (VisibleChunkCollectorHook) this frames camera before Sodium builds its list
+    @Inject(method = "finalizeRenderLists", at = @At("HEAD"))
+    private void infinite$listCamera(Camera camera, Viewport viewport, FogParameters fog, boolean updateImmediately, CallbackInfo ci) {
+        VisibleVanillaSections.listCamera(LodRendererHolder.isActive() ? viewport.getTransform() : null);
+    }
 
     @Inject(method = "renderOutOfGraph", at = @At("HEAD"))
     private void infinite$outOfGraphList(Viewport viewport, FogParameters fog, CallbackInfo ci) {
